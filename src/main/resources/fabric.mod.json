@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "cssmoke",
+  "version": "${version}",
+  "name": "CS Smoke",
+  "description": "CS2-style volumetric smoke grenades. /smoke to throw one; walk through it to push it around.",
+  "authors": ["Xyphiuh"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.xyphia.cssmoke.CsSmokeClient"]
+  },
+  "mixins": [
+    { "config": "cssmoke.client.mixins.json", "environment": "client" }
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.3",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}
