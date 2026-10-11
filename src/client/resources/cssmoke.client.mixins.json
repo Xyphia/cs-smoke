@@ -1,0 +1,7 @@
+{
+  "required": true,
+  "package": "dev.xyphia.cssmoke.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "client": ["LevelRendererMixin"],
+  "injectors": { "defaultRequire": 1 }
+}
