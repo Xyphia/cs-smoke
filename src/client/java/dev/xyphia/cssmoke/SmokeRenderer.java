@@ -24,7 +24,7 @@ import org.joml.Matrix4f;
 import org.lwjgl.system.MemoryStack;
 
 /**
- * Raymarches every smoke volume as a fullscreen pass over the main colour target,
+ * Draws every smoke region as voxels, in a fullscreen pass over the main colour target,
  * after the world (including translucents and clouds) has been drawn.
  */
 public final class SmokeRenderer {
@@ -44,14 +44,14 @@ public final class SmokeRenderer {
         .withCull(false)
         .build();
 
-    /** Noise is evaluated in world space; wrap the camera so floats stay precise. */
-    private static final double NOISE_WRAP = 512.0;
+    /** Voxel coordinates are wrapped before upload so the shader's noise keeps float precision. */
+    private static final int VOXEL_WRAP = 4096;
 
     private SmokeRenderer() {
     }
 
     public static void render() {
-        if (SmokeManager.volumes().isEmpty()) {
+        if (SmokeManager.regions().isEmpty()) {
             return;
         }
         Minecraft mc = Minecraft.getInstance();
@@ -65,27 +65,26 @@ public final class SmokeRenderer {
         Matrix4f invViewProj = new Matrix4f(camera.projectionMatrix).mul(camera.viewRotationMatrix).invert();
         float partialTick = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
         float time = (float) ((mc.level.getGameTime() % 24000L) + partialTick) / 20.0F;
-        float noiseX = (float) (cam.x - Math.floor(cam.x / NOISE_WRAP) * NOISE_WRAP);
-        float noiseY = (float) (cam.y - Math.floor(cam.y / NOISE_WRAP) * NOISE_WRAP);
-        float noiseZ = (float) (cam.z - Math.floor(cam.z / NOISE_WRAP) * NOISE_WRAP);
 
         GpuDevice device = RenderSystem.getDevice();
         CommandEncoder encoder = device.createCommandEncoder();
 
-        for (SmokeVolume volume : SmokeManager.volumes()) {
-            SmokeVolumeGpu gpu = volume.gpu();
-            gpu.ensureCreated(device);
+        for (SmokeRegion region : SmokeManager.regions()) {
+            SmokeRegionGpu gpu = region.gpu();
+            int width = region.nx * region.ny;
+            gpu.ensureCreated(device, width, region.nz);
 
             ByteBuffer staging = gpu.staging();
-            volume.writeInterpolated(staging, partialTick);
-            encoder.writeToTexture(gpu.texture(), staging, 0, 0, 0, 0, SmokeVolumeGpu.ATLAS_WIDTH, SmokeVolumeGpu.ATLAS_HEIGHT);
+            region.writeInterpolated(staging, partialTick);
+            encoder.writeToTexture(gpu.texture(), staging, 0, 0, 0, 0, width, region.nz);
 
+            float v = SmokeRegion.VOXEL;
             try (MemoryStack stack = MemoryStack.stackPush()) {
-                ByteBuffer info = Std140Builder.onStack(stack, SmokeVolumeGpu.UBO_SIZE)
+                ByteBuffer info = Std140Builder.onStack(stack, SmokeRegionGpu.UBO_SIZE)
                     .putMat4f(invViewProj)
-                    .putVec4((float) (volume.originX - cam.x), (float) (volume.originY - cam.y), (float) (volume.originZ - cam.z), SmokeVolume.VOXEL)
-                    .putVec4(SmokeVolume.NX, SmokeVolume.NY, SmokeVolume.NZ, time)
-                    .putVec4(noiseX, noiseY, noiseZ, volume.brightness())
+                    .putVec4((float) (region.minX * v - cam.x), (float) (region.minY * v - cam.y), (float) (region.minZ * v - cam.z), v)
+                    .putVec4(region.nx, region.ny, region.nz, time)
+                    .putVec4(Math.floorMod(region.minX, VOXEL_WRAP), Math.floorMod(region.minY, VOXEL_WRAP), Math.floorMod(region.minZ, VOXEL_WRAP), region.brightness())
                     .get();
                 encoder.writeToBuffer(gpu.ubo().slice(), info);
             }
