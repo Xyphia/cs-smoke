@@ -38,6 +38,8 @@ public final class SmokeRegion implements AutoCloseable {
     private static final double PROJECTILE_SPEED = 0.6;
     /** One voxel = half a block, more than the shader's noise warp. */
     private static final int DILATE = 1;
+    /** Adaptive dilation based on edge detection to refine boundaries. */
+    private static final float EDGE_THRESHOLD = 0.03F;
     private static final float LIGHT_ABSORB = 0.9F;
     private static final float LIGHT_FALLOFF = 0.85F;
 
@@ -275,8 +277,9 @@ public final class SmokeRegion implements AutoCloseable {
             for (int z = 0; z < nz; z++) {
                 for (int x = 0; x < nx; x++) {
                     float d = dilateA[index(x, y, z)];
-                    // Below this the shader can't produce a visible cube (see VISIBLE_DENSITY).
-                    if (d < 0.075F) {
+                    // Adaptive threshold: refined edges for better boundary detection, sharper near walls.
+                    float threshold = isNearWall(x, y, z) ? 0.055F : 0.075F;
+                    if (d < threshold) {
                         continue;
                     }
                     x0 = Math.min(x0, x);
@@ -294,6 +297,33 @@ public final class SmokeRegion implements AutoCloseable {
             }
         }
         occupied = x1 > x0 ? new int[] {x0, y0, z0, x1, y1, z1} : new int[] {0, 0, 0, 0, 0, 0};
+    }
+
+    /** Detect if a voxel is near a wall by checking density gradient. */
+    private boolean isNearWall(int x, int y, int z) {
+        float center = dilateA[index(x, y, z)];
+        if (center < EDGE_THRESHOLD) {
+            return false;
+        }
+        int count = 0;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    if (dx == 0 && dy == 0 && dz == 0) continue;
+                    int nx = x + dx;
+                    int ny = y + dy;
+                    int nz = z + dz;
+                    if (nx >= 0 && ny >= 0 && nz >= 0 && nx < this.nx && ny < this.ny && nz < this.nz) {
+                        if (dilateA[index(nx, ny, nz)] < EDGE_THRESHOLD) {
+                            count++;
+                        }
+                    } else {
+                        count++;
+                    }
+                }
+            }
+        }
+        return count >= 10;
     }
 
     /**

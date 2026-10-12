@@ -51,8 +51,11 @@ const float THRESHOLD = 0.35;
 // thinner than this can never produce a visible cube: skip it (it is mostly the faint
 // diffusion fringe around a cloud, which rays from outside would otherwise fine-step).
 const float VISIBLE_DENSITY = 0.075;
+const float EDGE_VISIBLE_DENSITY = 0.055;
 const float CUBE_EXTINCTION = 2.4;
 const float SURFACE_ALPHA = 0.32;
+const float EDGE_SURFACE_ALPHA = 0.24;
+const float EDGE_DETECTION_RANGE = 2.5;
 // Once a ray is this occluded the pixel-cube detail behind is invisible, so it finishes
 // with a cheap half-block march instead.
 const float HANDOFF_TRANSMITTANCE = 0.45;
@@ -118,6 +121,29 @@ vec2 boxHit(vec3 dir, vec3 boxMin, vec3 boxMax) {
     vec3 tmin = min(t0, t1);
     vec3 tmax = max(t0, t1);
     return vec2(max(max(tmin.x, tmin.y), tmin.z), min(min(tmax.x, tmax.y), tmax.z));
+}
+
+// Detect if voxel is at a boundary (near empty space), reducing visibility threshold.
+float detectEdgeFactor(vec3 g) {
+    vec4 center = coarseSample(g);
+    if (center.a < EDGE_VISIBLE_DENSITY) {
+        return 0.0;
+    }
+    int edgeCount = 0;
+    int sampleCount = 0;
+    for (float dx = -1.0; dx <= 1.0; dx += 1.0) {
+        for (float dy = -1.0; dy <= 1.0; dy += 1.0) {
+            for (float dz = -1.0; dz <= 1.0; dz += 1.0) {
+                if (dx == 0.0 && dy == 0.0 && dz == 0.0) continue;
+                vec4 neighbor = coarseSample(g + vec3(dx, dy, dz));
+                if (neighbor.a < EDGE_VISIBLE_DENSITY) {
+                    edgeCount++;
+                }
+                sampleCount++;
+            }
+        }
+    }
+    return float(edgeCount) / float(sampleCount);
 }
 
 void main() {
@@ -233,7 +259,9 @@ void main() {
 
         float dens = 0.0;
         vec2 puffs = vec2(0.0);
-        if (base > VISIBLE_DENSITY) {
+        float edgeFactor = detectEdgeFactor(g);
+        float visibilityThreshold = mix(VISIBLE_DENSITY, EDGE_VISIBLE_DENSITY, edgeFactor);
+        if (base > visibilityThreshold) {
             puffs = puffsAt(pixel + drift);
             float shape = base * 1.3 - (1.0 - puffs.x) * 0.7 - (1.0 - puffs.y) * 0.22;
             dens = clamp(shape * 3.4, 0.0, 1.0);
@@ -247,7 +275,8 @@ void main() {
 
             float exitT = min(min(min(tMax.x, tMax.y), tMax.z), tEnd);
             float through = exp(-CUBE_EXTINCTION * dens * max(exitT - t, 0.0));
-            float alpha = 1.0 - through * (inSmoke ? 1.0 : 1.0 - SURFACE_ALPHA);
+            float surfaceAlpha = mix(SURFACE_ALPHA, EDGE_SURFACE_ALPHA, edgeFactor);
+            float alpha = 1.0 - through * (inSmoke ? 1.0 : 1.0 - surfaceAlpha);
             color += transmittance * alpha * c;
             transmittance *= 1.0 - alpha;
             inSmoke = true;
