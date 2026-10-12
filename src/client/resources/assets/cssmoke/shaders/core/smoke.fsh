@@ -5,7 +5,8 @@
 // density, warped and eroded by puff noise) is evaluated at the centre of every 1/16-block
 // cube along the ray; a cube is either smoke or empty, and smoke cubes take the cloud's
 // volumetric lighting at their centre, so the shading reads as one cloud rather than as
-// lit blocks.
+// lit blocks. Transparency is Beer-Lambert over the ray's path through each cube, so only
+// the silhouette is pixel-stepped and thin parts of the cloud are see-through.
 //
 // DensitySampler is a 2D atlas of Y slices: R = density, G = density dilated by one block,
 // used to skip empty simulation cells in one jump.
@@ -27,7 +28,13 @@ layout(location = 0) out vec4 fragColor;
 const float PIXEL = 1.0 / 16.0;
 const int MAX_CELLS = 900;
 const float THRESHOLD = 0.35;
-const float CUBE_ALPHA = 0.94;
+// Absorption per block of smoke at full density. Each pixel cube absorbs by the length the
+// ray travels inside it, so touching cubes act as one medium with no internal faces.
+const float CUBE_EXTINCTION = 2.4;
+// Extra opacity where the ray crosses from empty space into smoke. Only the outer skin of the
+// cloud has such a boundary, so the silhouette stays crisp while joins between neighbouring
+// smoke cubes add nothing.
+const float SURFACE_ALPHA = 0.32;
 const int LIGHT_STEPS = 4;
 const float EXTINCTION = 7.0;
 const float LIGHT_BANDS = 7.0;
@@ -198,6 +205,7 @@ void main() {
     float brightness = VoxelOrigin.w;
     float transmittance = 1.0;
     vec3 color = vec3(0.0);
+    bool inSmoke = false;
 
     for (int i = 0; i < MAX_CELLS; i++) {
         if (t >= tEnd || any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, pixelCount))) {
@@ -212,6 +220,7 @@ void main() {
             t = min(min(tExit.x, tExit.y), tExit.z);
             cell = ivec3(floor((dir * (t + 1.0e-4) - boxMin) / PIXEL));
             tMax = (boxMin + (vec3(cell) + max(stepDir, 0.0)) * PIXEL) / safeDir;
+            inSmoke = false;
             continue;
         }
 
@@ -219,11 +228,17 @@ void main() {
         float dens = smokeDensity(p, warp, time);
         if (dens > THRESHOLD) {
             vec3 c = smokeLight(p, warp, dens, time) * brightness;
-            color += transmittance * CUBE_ALPHA * c;
-            transmittance *= 1.0 - CUBE_ALPHA;
+            float exitT = min(min(min(tMax.x, tMax.y), tMax.z), tEnd);
+            float through = exp(-CUBE_EXTINCTION * dens * max(exitT - t, 0.0));
+            float alpha = 1.0 - through * (inSmoke ? 1.0 : 1.0 - SURFACE_ALPHA);
+            color += transmittance * alpha * c;
+            transmittance *= 1.0 - alpha;
+            inSmoke = true;
             if (transmittance < 0.02) {
                 break;
             }
+        } else {
+            inSmoke = false;
         }
 
         // Step to the neighbouring pixel cube across the nearest boundary.
