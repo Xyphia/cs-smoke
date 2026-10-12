@@ -13,7 +13,7 @@
 // Everything expensive is baked: per cube this is ~5 texture fetches and a little ALU.
 
 // Simulation atlas, Y slices side by side: R = previous density, G = density,
-// B = lighting, A = density dilated by one block (for skipping empty space).
+// B = lighting, A = density dilated by half a block (for skipping empty space).
 uniform sampler2D DensitySampler;
 // Max dilated density per 4x4x4-voxel brick, same slice layout, for skipping 2 blocks at once.
 uniform sampler2D BrickSampler;
@@ -40,11 +40,21 @@ layout(location = 0) out vec4 fragColor;
 const int PIXELS_PER_VOXEL = 8;
 const int BRICK = 4;
 const float PIXEL = 1.0 / 16.0;
-const int MAX_CELLS = 512;
+// Fine steps per ray before handing off to the coarse march.
+const int MAX_CELLS = 256;
 const float THRESHOLD = 0.35;
+// A cube is visible only if shape * 3.4 > THRESHOLD, and shape <= base * 1.3, so smoke
+// thinner than this can never produce a visible cube: skip it (it is mostly the faint
+// diffusion fringe around a cloud, which rays from outside would otherwise fine-step).
+const float VISIBLE_DENSITY = 0.075;
 const float CUBE_EXTINCTION = 2.4;
 const float SURFACE_ALPHA = 0.32;
-const float WARP_BLOCKS = 0.85;
+// Once a ray is this occluded the pixel-cube detail behind is invisible, so it finishes
+// with a cheap half-block march instead.
+const float HANDOFF_TRANSMITTANCE = 0.45;
+const float MIN_TRANSMITTANCE = 0.04;
+const int MAX_COARSE_STEPS = 48;
+const float WARP_BLOCKS = 0.45;
 const float LIGHT_BANDS = 7.0;
 const vec3 LIT_COLOR = vec3(0.96, 0.91, 0.79);
 const vec3 SHADOW_COLOR = vec3(0.40, 0.37, 0.33);
@@ -68,7 +78,7 @@ vec4 coarseSample(vec3 g) {
 }
 
 float brickSmoke(ivec3 brick) {
-    int bricksX = (int(Grid.x) + BRICK - 1) / BRICK;
+    int bricksX = (int(Grid.x) + BRICK - 1) >> 2;
     return texelFetch(BrickSampler, ivec2(brick.x + brick.y * bricksX, brick.z), 0).r;
 }
 
@@ -127,10 +137,14 @@ void main() {
         discard;
     }
 
-    // Level of detail: far away a 1/16 cube is under a screen pixel, so step coarser.
-    int scale = t > 48.0 ? 4 : t > 24.0 ? 2 : 1;
+    // Level of detail: this pass runs at half resolution, where a 1/16 cube is about one
+    // pixel at 12 blocks, so step coarser beyond that.
+    int lod = t > 48.0 ? 3 : t > 24.0 ? 2 : t > 12.0 ? 1 : 0;
+    int scale = 1 << lod;
     float cube = PIXEL * float(scale);
-    int cubesPerVoxel = PIXELS_PER_VOXEL / scale;
+    // Shifts instead of integer divides, which are slow on GPUs.
+    int voxelShift = 3 - lod;
+    int cubesPerVoxel = 1 << voxelShift;
     ivec3 cubeCount = ivec3(Grid.xyz) * cubesPerVoxel;
 
     vec3 stepDir = vec3(dir.x >= 0.0 ? 1.0 : -1.0, dir.y >= 0.0 ? 1.0 : -1.0, dir.z >= 0.0 ? 1.0 : -1.0);
@@ -158,23 +172,34 @@ void main() {
     // The warp only changes every half block (8 pixel cubes); fetch it once per cell.
     ivec3 warpCell = ivec3(-2147483647);
     vec3 warp = vec3(0.0);
+    // Empty-space checks only need redoing when the ray enters a new simulation voxel.
+    ivec3 checkedVoxel = ivec3(-2147483647);
+    bool handoff = false;
 
     for (int i = 0; i < MAX_CELLS; i++) {
         if (t >= tEnd || any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, cubeCount))) {
             break;
         }
+        if (i == MAX_CELLS - 1) {
+            handoff = true;
+            break;
+        }
         // Empty space: jump to where the ray leaves the empty brick or voxel. Always move
         // forward, or rays running exactly along a cell boundary would stall in place.
-        ivec3 voxelCell = cell / cubesPerVoxel;
-        ivec3 brick = voxelCell / BRICK;
+        ivec3 voxelCell = cell >> voxelShift;
         float skipSize = 0.0;
         vec3 skipCell = vec3(0.0);
-        if (brickSmoke(brick) < 0.01) {
-            skipSize = voxel * float(BRICK);
-            skipCell = vec3(brick);
-        } else if (nearSmoke(voxelCell) < 0.01) {
-            skipSize = voxel;
-            skipCell = vec3(voxelCell);
+        if (voxelCell != checkedVoxel) {
+            ivec3 brick = voxelCell >> 2;
+            if (brickSmoke(brick) < VISIBLE_DENSITY) {
+                skipSize = voxel * float(BRICK);
+                skipCell = vec3(brick);
+            } else if (nearSmoke(voxelCell) < VISIBLE_DENSITY) {
+                skipSize = voxel;
+                skipCell = vec3(voxelCell);
+            } else {
+                checkedVoxel = voxelCell;
+            }
         }
         if (skipSize > 0.0) {
             vec3 tExit = (boxMin + (skipCell + boundaryOffset) * skipSize) / safeDir;
@@ -185,7 +210,7 @@ void main() {
             continue;
         }
 
-        ivec3 pixel = pixelOrigin + cell * scale;
+        ivec3 pixel = pixelOrigin + (cell << lod);
         ivec3 wc = (pixel + warpDrift) >> 3;
         if (wc != warpCell) {
             warpCell = wc;
@@ -197,7 +222,7 @@ void main() {
 
         float dens = 0.0;
         vec2 puffs = vec2(0.0);
-        if (base > 0.01) {
+        if (base > VISIBLE_DENSITY) {
             puffs = puffsAt(pixel + drift);
             float shape = base * 1.3 - (1.0 - puffs.x) * 0.7 - (1.0 - puffs.y) * 0.22;
             dens = clamp(shape * 3.4, 0.0, 1.0);
@@ -215,7 +240,9 @@ void main() {
             color += transmittance * alpha * c;
             transmittance *= 1.0 - alpha;
             inSmoke = true;
-            if (transmittance < 0.02) {
+            if (transmittance < HANDOFF_TRANSMITTANCE) {
+                t = exitT;
+                handoff = true;
                 break;
             }
         } else {
@@ -235,6 +262,20 @@ void main() {
             t = tMax.z;
             tMax.z += tDelta.z;
             cell.z += stepInt.z;
+        }
+    }
+
+    // Behind the visible surface: march the smooth simulation density in half-block steps.
+    if (handoff) {
+        for (int j = 0; j < MAX_COARSE_STEPS && t < tEnd && transmittance > MIN_TRANSMITTANCE; j++) {
+            float seg = min(voxel, tEnd - t);
+            vec4 sim = coarseSample((dir * (t + seg * 0.5) - boxMin) / voxel);
+            float dens = clamp(mix(sim.r, sim.g, partialTick) * 1.6 - 0.3, 0.0, 1.0);
+            float light = floor(clamp(sim.b, 0.0, 1.0) * LIGHT_BANDS + 0.5) / LIGHT_BANDS;
+            float alpha = 1.0 - exp(-CUBE_EXTINCTION * dens * seg);
+            color += transmittance * alpha * mix(SHADOW_COLOR, LIT_COLOR, light) * brightness;
+            transmittance *= 1.0 - alpha;
+            t += seg;
         }
     }
 
