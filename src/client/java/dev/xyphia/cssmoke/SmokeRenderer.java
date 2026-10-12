@@ -37,6 +37,8 @@ public final class SmokeRenderer {
         .withUniform("SmokeInfo", UniformType.UNIFORM_BUFFER)
         .withUniform("DensitySampler", UniformType.COMBINED_IMAGE_SAMPLER)
         .withUniform("BrickSampler", UniformType.COMBINED_IMAGE_SAMPLER)
+        .withUniform("LightLevelSampler", UniformType.COMBINED_IMAGE_SAMPLER)
+        .withUniform("LightmapSampler", UniformType.COMBINED_IMAGE_SAMPLER)
         .withUniform("PuffSampler", UniformType.COMBINED_IMAGE_SAMPLER)
         .withUniform("WarpSampler", UniformType.COMBINED_IMAGE_SAMPLER)
         .withUniform("DepthSampler", UniformType.COMBINED_IMAGE_SAMPLER)
@@ -117,6 +119,10 @@ public final class SmokeRenderer {
                 region.writeBricks(gpu.brickStaging());
                 encoder.writeToTexture(gpu.brickTexture(), gpu.brickStaging(), 0, 0, 0, 0, gpu.brickWidth(), gpu.brickHeight());
             }
+            if (gpu.needsLightUpload(region.lightVersion())) {
+                region.writeLight(gpu.lightStaging());
+                encoder.writeToTexture(gpu.lightTexture(), gpu.lightStaging(), 0, 0, 0, 0, width, region.nz);
+            }
             int[] occ = region.occupiedBounds();
             if (occ[3] <= occ[0]) {
                 continue;
@@ -129,7 +135,7 @@ public final class SmokeRenderer {
                     .putMat4f(invViewProj)
                     .putVec4((float) (region.minX * v - cam.x), (float) (region.minY * v - cam.y), (float) (region.minZ * v - cam.z), v)
                     .putVec4(region.nx, region.ny, region.nz, time)
-                    .putVec4(Math.floorMod(region.minX, VOXEL_WRAP), Math.floorMod(region.minY, VOXEL_WRAP), Math.floorMod(region.minZ, VOXEL_WRAP), region.brightness())
+                    .putVec4(Math.floorMod(region.minX, VOXEL_WRAP), Math.floorMod(region.minY, VOXEL_WRAP), Math.floorMod(region.minZ, VOXEL_WRAP), 0.0F)
                     .putVec4(partialTick, 0.0F, 0.0F, 0.0F)
                     .putVec4(occ[0], occ[1], occ[2], 0.0F)
                     .putVec4(occ[3], occ[4], occ[5], 0.0F)
@@ -146,6 +152,8 @@ public final class SmokeRenderer {
             pass.setUniform("PuffSampler", SmokeNoise.puffs(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
             pass.setUniform("WarpSampler", SmokeNoise.warp(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
             pass.setUniform("DepthSampler", main.getDepthTextureView(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
+            // The world's own lightmap, so the smoke is lit exactly like the blocks around it.
+            pass.setUniform("LightmapSampler", mc.gameRenderer.levelLightmap(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
             for (SmokeRegion region : SmokeManager.regions()) {
                 int[] occ = region.occupiedBounds();
                 if (occ[3] <= occ[0]) {
@@ -155,6 +163,7 @@ public final class SmokeRenderer {
                 pass.setUniform("SmokeInfo", gpu.ubo());
                 pass.setUniform("DensitySampler", gpu.view(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
                 pass.setUniform("BrickSampler", gpu.brickView(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
+                pass.setUniform("LightLevelSampler", gpu.lightView(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
                 pass.draw(3, 1, 0, 0);
             }
         }

@@ -22,12 +22,16 @@ uniform sampler2D PuffSampler;
 // 16^3 tiling warp offsets at one texel per half block, RGB in [0, 1].
 uniform sampler2D WarpSampler;
 uniform sampler2D DepthSampler;
+// Block and sky light level of each voxel (level / 15), same slice layout as the density.
+uniform sampler2D LightLevelSampler;
+// The game's 16x16 lightmap (x: block light, y: sky light), as used for terrain.
+uniform sampler2D LightmapSampler;
 
 layout(std140) uniform SmokeInfo {
     mat4 InvViewProj;   // clip -> camera-relative world
     vec4 Origin;        // xyz: grid min corner relative to camera, w: voxel size
     vec4 Grid;          // xyz: voxel counts, w: time in seconds
-    vec4 VoxelOrigin;   // xyz: world voxel index of the min corner (wrapped), w: brightness
+    vec4 VoxelOrigin;   // xyz: world voxel index of the min corner (wrapped)
     vec4 Params;        // x: partial tick
     vec4 OccMin;        // xyz: min voxel of everything that can render
     vec4 OccMax;        // xyz: max voxel (exclusive)
@@ -87,6 +91,14 @@ float nearSmoke(ivec3 voxel) {
         return 0.0;
     }
     return texelFetch(DensitySampler, ivec2(voxel.x + voxel.y * int(Grid.x), voxel.z), 0).a;
+}
+
+// World lighting at a voxel, from the same lightmap the surrounding blocks use, so the
+// smoke darkens, tints and reacts to torches exactly like terrain does.
+vec3 worldLight(ivec3 voxel) {
+    voxel = clamp(voxel, ivec3(0), ivec3(Grid.xyz) - 1);
+    vec2 levels = texelFetch(LightLevelSampler, ivec2(voxel.x + voxel.y * int(Grid.x), voxel.z), 0).rg * 15.0;
+    return texture(LightmapSampler, (levels + 0.5) / 16.0).rgb;
 }
 
 vec2 puffsAt(ivec3 pixel) {
@@ -160,7 +172,6 @@ void main() {
 
     float time = Grid.w;
     float partialTick = Params.x;
-    float brightness = VoxelOrigin.w;
     ivec3 pixelOrigin = ivec3(VoxelOrigin.xyz) * PIXELS_PER_VOXEL;
     // Noise scrolls in whole pixels, so the motion stays on the pixel grid.
     ivec3 drift = ivec3(floor(vec3(time * 0.04, -time * 0.12, time * 0.03) * 16.0));
@@ -232,7 +243,7 @@ void main() {
             // Puff peaks catch more light than the creases between them.
             float light = clamp(sim.b * mix(0.75, 1.08, puffs.x), 0.0, 1.0);
             light = floor(light * LIGHT_BANDS + 0.5) / LIGHT_BANDS;
-            vec3 c = mix(SHADOW_COLOR, LIT_COLOR, light) * brightness;
+            vec3 c = mix(SHADOW_COLOR, LIT_COLOR, light) * worldLight(voxelCell);
 
             float exitT = min(min(min(tMax.x, tMax.y), tMax.z), tEnd);
             float through = exp(-CUBE_EXTINCTION * dens * max(exitT - t, 0.0));
@@ -273,7 +284,8 @@ void main() {
             float dens = clamp(mix(sim.r, sim.g, partialTick) * 1.6 - 0.3, 0.0, 1.0);
             float light = floor(clamp(sim.b, 0.0, 1.0) * LIGHT_BANDS + 0.5) / LIGHT_BANDS;
             float alpha = 1.0 - exp(-CUBE_EXTINCTION * dens * seg);
-            color += transmittance * alpha * mix(SHADOW_COLOR, LIT_COLOR, light) * brightness;
+            vec3 lit = worldLight(ivec3(floor((dir * (t + seg * 0.5) - boxMin) / voxel)));
+            color += transmittance * alpha * mix(SHADOW_COLOR, LIT_COLOR, light) * lit;
             transmittance *= 1.0 - alpha;
             t += seg;
         }

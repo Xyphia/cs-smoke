@@ -29,6 +29,10 @@ public final class SmokeRegionGpu implements AutoCloseable {
     private int width;
     private int height;
     private int uploadedVersion = -1;
+    private GpuTexture lightTexture;
+    private GpuTextureView lightView;
+    private ByteBuffer lightStaging;
+    private int uploadedLightVersion = -1;
 
     public void ensureCreated(GpuDevice device, int width, int height, int brickWidth, int brickHeight) {
         if (texture != null && this.width == width && this.height == height) {
@@ -36,6 +40,7 @@ public final class SmokeRegionGpu implements AutoCloseable {
         }
         close();
         uploadedVersion = -1;
+        uploadedLightVersion = -1;
         this.width = width;
         this.height = height;
         texture = device.createTexture("cssmoke density", GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
@@ -49,6 +54,31 @@ public final class SmokeRegionGpu implements AutoCloseable {
             GpuFormat.R8_UNORM, brickWidth, brickHeight, 1, 1);
         brickView = device.createTextureView(brickTexture);
         brickStaging = MemoryUtil.memAlloc(brickWidth * brickHeight);
+        lightTexture = device.createTexture("cssmoke light levels", GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
+            GpuFormat.RG8_UNORM, width, height, 1, 1);
+        lightView = device.createTextureView(lightTexture);
+        lightStaging = MemoryUtil.memAlloc(width * height * 2);
+    }
+
+    public GpuTexture lightTexture() {
+        return lightTexture;
+    }
+
+    public GpuTextureView lightView() {
+        return lightView;
+    }
+
+    public ByteBuffer lightStaging() {
+        return lightStaging;
+    }
+
+    /** True if the light levels changed since the last upload; marks them uploaded. */
+    public boolean needsLightUpload(int version) {
+        if (version == uploadedLightVersion) {
+            return false;
+        }
+        uploadedLightVersion = version;
+        return true;
     }
 
     public GpuTexture brickTexture() {
@@ -125,6 +155,18 @@ public final class SmokeRegionGpu implements AutoCloseable {
         if (brickStaging != null) {
             MemoryUtil.memFree(brickStaging);
             brickStaging = null;
+        }
+        if (lightView != null) {
+            lightView.close();
+            lightView = null;
+        }
+        if (lightTexture != null) {
+            lightTexture.close();
+            lightTexture = null;
+        }
+        if (lightStaging != null) {
+            MemoryUtil.memFree(lightStaging);
+            lightStaging = null;
         }
     }
 }

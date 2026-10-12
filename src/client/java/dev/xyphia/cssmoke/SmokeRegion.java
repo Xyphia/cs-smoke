@@ -33,6 +33,9 @@ public final class SmokeRegion implements AutoCloseable {
     private static final float DIFFUSION = 0.035F;
     private static final float MAX_DENSITY = 1.6F;
     private static final int RECLASSIFY_DELAY = 3;
+    private static final int LIGHT_REFRESH_TICKS = 20;
+    /** Faster than this (blocks per tick) and small, an entity cuts a tunnel like a bullet. */
+    private static final double PROJECTILE_SPEED = 0.6;
     /** One voxel = half a block, more than the shader's noise warp. */
     private static final int DILATE = 1;
     private static final float LIGHT_ABSORB = 0.9F;
@@ -62,7 +65,8 @@ public final class SmokeRegion implements AutoCloseable {
     private int version;
     private final List<SmokeEmitter> emitters = new ArrayList<>();
     private final List<int[]> pendingReclassify = new ArrayList<>();
-    private float brightness = 1.0F;
+    private final byte[] lightLevels;
+    private int lightVersion;
     private int age;
 
     private final SmokeRegionGpu gpu = new SmokeRegionGpu();
@@ -82,8 +86,9 @@ public final class SmokeRegion implements AutoCloseable {
         density = new float[n];
         previous = new float[n];
         scratch = new float[n];
+        lightLevels = new byte[n * 2];
         classify(level, 0, 0, 0, nx - 1, ny - 1, nz - 1);
-        updateBrightness(level);
+        updateLightLevels(level);
     }
 
     public static SmokeRegion of(Level level, SmokeEmitter emitter) {
@@ -145,8 +150,27 @@ public final class SmokeRegion implements AutoCloseable {
             && e.minZ < minZ + nz && e.minZ + SmokeEmitter.SZ > minZ;
     }
 
-    public float brightness() {
-        return brightness;
+    /** Bumped whenever the per-voxel light levels change. */
+    public int lightVersion() {
+        return lightVersion;
+    }
+
+    /**
+     * Writes the sky and block light level of every voxel as RG8 texels (level / 15) in the
+     * atlas layout, so the shader can light the smoke from the game's own lightmap.
+     */
+    public void writeLight(ByteBuffer out) {
+        int width = nx * ny;
+        for (int y = 0; y < ny; y++) {
+            for (int z = 0; z < nz; z++) {
+                for (int x = 0; x < nx; x++) {
+                    int i = index(x, y, z);
+                    int texel = (z * width + y * nx + x) * 2;
+                    out.put(texel, lightLevels[i * 2]);
+                    out.put(texel + 1, lightLevels[i * 2 + 1]);
+                }
+            }
+        }
     }
 
     public SmokeRegionGpu gpu() {
@@ -384,8 +408,8 @@ public final class SmokeRegion implements AutoCloseable {
         diffuse();
         runPendingReclassify(level);
 
-        if (age % 10 == 0) {
-            updateBrightness(level);
+        if (age % LIGHT_REFRESH_TICKS == 0) {
+            updateLightLevels(level);
         }
     }
 
@@ -447,6 +471,7 @@ public final class SmokeRegion implements AutoCloseable {
             int[] job = it.next();
             if (--job[0] <= 0) {
                 classify(level, job[1], job[2], job[3], job[4], job[5], job[6]);
+                updateLightLevels(level);
                 it.remove();
             }
         }
@@ -470,11 +495,81 @@ public final class SmokeRegion implements AutoCloseable {
             double vy = entity.getY() - entity.yo;
             double vz = entity.getZ() - entity.zo;
             double speed = Math.sqrt(vx * vx + vy * vy + vz * vz);
+            double size = Math.max(box.getXsize(), Math.max(box.getYsize(), box.getZsize()));
+            if (speed > PROJECTILE_SPEED && size < 1.0) {
+                // Fast and small (arrows, snowballs, tridents...): it moves several blocks per
+                // tick, so carve along the whole path it covered, not just where it ended up.
+                tunnel(c.subtract(vx, vy, vz), c, Math.max(0.55, size * 0.5 + 0.35));
+                continue;
+            }
             double rx = box.getXsize() * 0.5 + 0.65;
             double ry = box.getYsize() * 0.5 + 0.4;
             double rz = box.getZsize() * 0.5 + 0.65;
             float strength = (float) (0.06 + Math.min(1.0, speed * 4.0) * 0.8);
             pushEllipsoid(c, rx, ry, rz, vx, vy, vz, speed, strength);
+        }
+    }
+
+    /**
+     * Clears a tube along a segment, pushing the smoke sideways out of it, and holds it
+     * open briefly so the trail stays visible before it refills.
+     */
+    private void tunnel(Vec3 from, Vec3 to, double radius) {
+        double dx = to.x - from.x;
+        double dy = to.y - from.y;
+        double dz = to.z - from.z;
+        double lenSq = dx * dx + dy * dy + dz * dz;
+        int x0 = Math.max(0, toVoxel(Math.min(from.x, to.x) - radius) - minX);
+        int x1 = Math.min(nx - 1, toVoxel(Math.max(from.x, to.x) + radius) - minX);
+        int y0 = Math.max(0, toVoxel(Math.min(from.y, to.y) - radius) - minY);
+        int y1 = Math.min(ny - 1, toVoxel(Math.max(from.y, to.y) + radius) - minY);
+        int z0 = Math.max(0, toVoxel(Math.min(from.z, to.z) - radius) - minZ);
+        int z1 = Math.min(nz - 1, toVoxel(Math.max(from.z, to.z) + radius) - minZ);
+
+        for (int y = y0; y <= y1; y++) {
+            for (int z = z0; z <= z1; z++) {
+                for (int x = x0; x <= x1; x++) {
+                    int i = index(x, y, z);
+                    if (!open[i]) {
+                        continue;
+                    }
+                    double px = (minX + x + 0.5) * VOXEL;
+                    double py = (minY + y + 0.5) * VOXEL;
+                    double pz = (minZ + z + 0.5) * VOXEL;
+                    double t = lenSq > 1.0E-8 ? ((px - from.x) * dx + (py - from.y) * dy + (pz - from.z) * dz) / lenSq : 0.0;
+                    t = Math.max(0.0, Math.min(1.0, t));
+                    double cx = from.x + dx * t;
+                    double cy = from.y + dy * t;
+                    double cz = from.z + dz * t;
+                    double ox = px - cx;
+                    double oy = py - cy;
+                    double oz = pz - cz;
+                    double dist = Math.sqrt(ox * ox + oy * oy + oz * oz);
+                    if (dist >= radius) {
+                        continue;
+                    }
+                    float w = (float) (1.0 - dist / radius);
+                    suppress[i] = Math.max(suppress[i], (int) (25 + 25 * w));
+                    float removed = density[i] * Math.min(1.0F, 0.6F + w);
+                    if (removed <= 0.001F) {
+                        continue;
+                    }
+                    density[i] -= removed;
+
+                    // Out to just past the tube wall, away from the path.
+                    double inv = 1.0 / Math.max(dist, 1.0E-3);
+                    double push = radius - dist + VOXEL;
+                    int tx = toVoxel(px + ox * inv * push) - minX;
+                    int ty = toVoxel(py + oy * inv * push) - minY;
+                    int tz = toVoxel(pz + oz * inv * push) - minZ;
+                    if (tx >= 0 && ty >= 0 && tz >= 0 && tx < nx && ty < ny && tz < nz) {
+                        int target = index(tx, ty, tz);
+                        if (open[target] && suppress[target] == 0) {
+                            density[target] = Math.min(MAX_DENSITY, density[target] + removed * 0.8F);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -558,12 +653,25 @@ public final class SmokeRegion implements AutoCloseable {
         return open[i] ? density[i] : self;
     }
 
-    private void updateBrightness(Level level) {
-        BlockPos p = BlockPos.containing((minX + nx * 0.5) * VOXEL, (minY + 6) * VOXEL, (minZ + nz * 0.5) * VOXEL);
-        float day = 1.0F - level.getSkyDarken() / 11.0F;
-        float sky = level.getBrightness(LightLayer.SKY, p) / 15.0F * day;
-        float block = level.getBrightness(LightLayer.BLOCK, p) / 15.0F * 0.85F;
-        brightness = 0.1F + 0.9F * Math.max(sky, block);
+    /** Samples block and sky light for every open voxel (stored as level * 17, i.e. level / 15). */
+    private void updateLightLevels(Level level) {
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        for (int y = 0; y < ny; y++) {
+            for (int z = 0; z < nz; z++) {
+                for (int x = 0; x < nx; x++) {
+                    int i = index(x, y, z);
+                    if (!open[i]) {
+                        lightLevels[i * 2] = 0;
+                        lightLevels[i * 2 + 1] = 0;
+                        continue;
+                    }
+                    pos.set((minX + x + 0.5) * VOXEL, (minY + y + 0.5) * VOXEL, (minZ + z + 0.5) * VOXEL);
+                    lightLevels[i * 2] = (byte) (level.getBrightness(LightLayer.BLOCK, pos) * 17);
+                    lightLevels[i * 2 + 1] = (byte) (level.getBrightness(LightLayer.SKY, pos) * 17);
+                }
+            }
+        }
+        lightVersion++;
     }
 
     @Override
