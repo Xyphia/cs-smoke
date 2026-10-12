@@ -33,8 +33,8 @@ public final class SmokeRegion implements AutoCloseable {
     private static final float DIFFUSION = 0.035F;
     private static final float MAX_DENSITY = 1.6F;
     private static final int RECLASSIFY_DELAY = 3;
-    /** Two voxels = one block, more than the shader's noise warp. */
-    private static final int DILATE = 2;
+    /** One voxel = half a block, more than the shader's noise warp. */
+    private static final int DILATE = 1;
     private static final float LIGHT_ABSORB = 0.9F;
     private static final float LIGHT_FALLOFF = 0.85F;
 
@@ -251,7 +251,8 @@ public final class SmokeRegion implements AutoCloseable {
             for (int z = 0; z < nz; z++) {
                 for (int x = 0; x < nx; x++) {
                     float d = dilateA[index(x, y, z)];
-                    if (d < 0.01F) {
+                    // Below this the shader can't produce a visible cube (see VISIBLE_DENSITY).
+                    if (d < 0.075F) {
                         continue;
                     }
                     x0 = Math.min(x0, x);
