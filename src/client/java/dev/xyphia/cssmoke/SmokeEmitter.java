@@ -23,6 +23,8 @@ public final class SmokeEmitter {
     private static final float MAX_COST = 12.5F;
     private static final float UP_COST = 1.8F;
     private static final float DOWN_COST = 0.8F;
+    /** Confinement factor: how constrained is a voxel (0=free, 1=fully enclosed). */
+    private float[] confinement = new float[SX * SY * SZ];
 
     /** Minimum corner of this emitter's grid, in world voxel coordinates. */
     public final int minX;
@@ -46,6 +48,40 @@ public final class SmokeEmitter {
 
     private static int index(int x, int y, int z) {
         return (y * SZ + z) * SX + x;
+    }
+
+    /** Calculate confinement factor: ratio of closed neighbors to open neighbors. */
+    private void computeConfinement(boolean[] open) {
+        for (int y = 0; y < SY; y++) {
+            for (int z = 0; z < SZ; z++) {
+                for (int x = 0; x < SX; x++) {
+                    int i = index(x, y, z);
+                    if (!open[i]) {
+                        confinement[i] = 0.0F;
+                        continue;
+                    }
+                    int openCount = 0;
+                    for (int dy = -1; dy <= 1; dy++) {
+                        for (int dz = -1; dz <= 1; dz++) {
+                            for (int dx = -1; dx <= 1; dx++) {
+                                if (dx == 0 && dy == 0 && dz == 0) continue;
+                                int nx = x + dx;
+                                int ny = y + dy;
+                                int nz = z + dz;
+                                if (nx >= 0 && nx < SX && ny >= 0 && ny < SY && nz >= 0 && nz < SZ) {
+                                    if (open[index(nx, ny, nz)]) {
+                                        openCount++;
+                                    }
+                                } else {
+                                    openCount++;
+                                }
+                            }
+                        }
+                    }
+                    confinement[i] = 1.0F - (openCount / 26.0F);
+                }
+            }
+        }
     }
 
     public void tick() {
@@ -185,11 +221,15 @@ public final class SmokeEmitter {
             }
         }
 
+        computeConfinement(open);
+
         for (int i = 0; i < cost.length; i++) {
             if (done[i]) {
-                // Dense core, softer rim; the shader's noise breaks the rim up.
+                // Density adjusts for confinement: tight spaces get denser smoke.
                 float edge = (reachedCost - cost[i]) / 3.0F;
-                target[i] = Math.max(0.25F, Math.min(1.0F, 0.45F + edge));
+                float baseDensity = 0.45F + edge;
+                float confinedBoost = confinement[i] * 0.35F;
+                target[i] = Math.max(0.25F, Math.min(1.0F, baseDensity + confinedBoost));
             } else {
                 cost[i] = Float.MAX_VALUE;
             }

@@ -123,27 +123,30 @@ vec2 boxHit(vec3 dir, vec3 boxMin, vec3 boxMax) {
     return vec2(max(max(tmin.x, tmin.y), tmin.z), min(min(tmax.x, tmax.y), tmax.z));
 }
 
-// Detect if voxel is at a boundary (near empty space), reducing visibility threshold.
-float detectEdgeFactor(vec3 g) {
+// Detect boundary factor based on dilated density and confinement gradient.
+// Returns 0 in open spaces, 1 at hard boundaries (walls, holes).
+float detectBoundaryFactor(vec3 g) {
     vec4 center = coarseSample(g);
     if (center.a < EDGE_VISIBLE_DENSITY) {
         return 0.0;
     }
-    int edgeCount = 0;
-    int sampleCount = 0;
-    for (float dx = -1.0; dx <= 1.0; dx += 1.0) {
-        for (float dy = -1.0; dy <= 1.0; dy += 1.0) {
-            for (float dz = -1.0; dz <= 1.0; dz += 1.0) {
-                if (dx == 0.0 && dy == 0.0 && dz == 0.0) continue;
-                vec4 neighbor = coarseSample(g + vec3(dx, dy, dz));
-                if (neighbor.a < EDGE_VISIBLE_DENSITY) {
-                    edgeCount++;
+    float gradient = 0.0;
+    int samples = 0;
+    for (float dist = 1.0; dist <= 2.0; dist += 1.0) {
+        for (float dx = -dist; dx <= dist; dx += dist) {
+            for (float dy = -dist; dy <= dist; dy += dist) {
+                for (float dz = -dist; dz <= dist; dz += dist) {
+                    if (abs(dx) < dist && abs(dy) < dist && abs(dz) < dist) continue;
+                    vec4 neighbor = coarseSample(g + vec3(dx, dy, dz) / dist);
+                    if (neighbor.a < EDGE_VISIBLE_DENSITY) {
+                        gradient += 1.0;
+                    }
+                    samples++;
                 }
-                sampleCount++;
             }
         }
     }
-    return float(edgeCount) / float(sampleCount);
+    return gradient / float(samples);
 }
 
 void main() {
@@ -259,8 +262,8 @@ void main() {
 
         float dens = 0.0;
         vec2 puffs = vec2(0.0);
-        float edgeFactor = detectEdgeFactor(g);
-        float visibilityThreshold = mix(VISIBLE_DENSITY, EDGE_VISIBLE_DENSITY, edgeFactor);
+        float boundaryFactor = detectBoundaryFactor(g);
+        float visibilityThreshold = mix(VISIBLE_DENSITY, EDGE_VISIBLE_DENSITY, boundaryFactor * 0.5);
         if (base > visibilityThreshold) {
             puffs = puffsAt(pixel + drift);
             float shape = base * 1.3 - (1.0 - puffs.x) * 0.7 - (1.0 - puffs.y) * 0.22;
@@ -275,7 +278,7 @@ void main() {
 
             float exitT = min(min(min(tMax.x, tMax.y), tMax.z), tEnd);
             float through = exp(-CUBE_EXTINCTION * dens * max(exitT - t, 0.0));
-            float surfaceAlpha = mix(SURFACE_ALPHA, EDGE_SURFACE_ALPHA, edgeFactor);
+            float surfaceAlpha = mix(SURFACE_ALPHA, EDGE_SURFACE_ALPHA, boundaryFactor * 0.6);
             float alpha = 1.0 - through * (inSmoke ? 1.0 : 1.0 - surfaceAlpha);
             color += transmittance * alpha * c;
             transmittance *= 1.0 - alpha;
