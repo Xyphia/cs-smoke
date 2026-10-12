@@ -30,5 +30,6 @@ public final class CsSmokeClient implements ClientModInitializer {
         ));
 
         ClientTickEvents.END_LEVEL_TICK.register(SmokeManager::tick);
+        SmokeNoise.prepare();
     }
 }
