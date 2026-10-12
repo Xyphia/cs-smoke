@@ -35,6 +35,8 @@ public final class SmokeRegion implements AutoCloseable {
     private static final int RECLASSIFY_DELAY = 3;
     /** Two voxels = one block, more than the shader's noise warp. */
     private static final int DILATE = 2;
+    private static final float LIGHT_ABSORB = 0.9F;
+    private static final float LIGHT_FALLOFF = 0.85F;
 
     /** Minimum corner and size, in world voxel coordinates. */
     public final int minX;
@@ -54,6 +56,10 @@ public final class SmokeRegion implements AutoCloseable {
     private float[] upload;
     private float[] dilateA;
     private float[] dilateB;
+    private float[] light;
+    private byte[] bricks;
+    private int[] occupied = {0, 0, 0, 0, 0, 0};
+    private int version;
     private final List<SmokeEmitter> emitters = new ArrayList<>();
     private final List<int[]> pendingReclassify = new ArrayList<>();
     private float brightness = 1.0F;
@@ -163,24 +169,33 @@ public final class SmokeRegion implements AutoCloseable {
         return true;
     }
 
+    /** Bumped whenever the density changes, so the renderer uploads at most once per tick. */
+    public int version() {
+        return version;
+    }
+
     /**
-     * Writes the density interpolated between the last two ticks as RG8 texels: R is the
-     * density, G the density dilated by {@link #DILATE} voxels so the shader can skip
-     * empty space without missing smoke its noise warp pushes outward.
+     * Writes the atlas as RGBA8 texels: R = previous tick's density, G = this tick's (the
+     * shader interpolates between them), B = precomputed lighting, A = density dilated by
+     * {@link #DILATE} voxels so the shader can skip empty space without missing smoke its
+     * noise warp pushes outward.
      */
-    public void writeInterpolated(ByteBuffer out, float partialTick) {
+    public void writeUpload(ByteBuffer out) {
         int n = density.length;
         if (upload == null) {
             upload = new float[n];
             dilateA = new float[n];
             dilateB = new float[n];
+            light = new float[n];
         }
         for (int i = 0; i < n; i++) {
-            upload[i] = previous[i] + (density[i] - previous[i]) * partialTick;
+            upload[i] = Math.max(previous[i], density[i]);
         }
         dilate(upload, dilateA, 1, nx);
         dilate(dilateA, dilateB, nx, nz);
         dilate(dilateB, dilateA, nx * nz, ny);
+        computeLight();
+        computeBricksAndBounds();
 
         int width = nx * ny;
         for (int y = 0; y < ny; y++) {
@@ -188,9 +203,88 @@ public final class SmokeRegion implements AutoCloseable {
                 for (int x = 0; x < nx; x++) {
                     int i = index(x, y, z);
                     // Atlas layout: Y slices side by side along U, Z along V.
-                    int texel = (z * width + y * nx + x) * 2;
-                    out.put(texel, toByte(upload[i]));
-                    out.put(texel + 1, toByte(dilateA[i]));
+                    int texel = (z * width + y * nx + x) * 4;
+                    out.put(texel, toByte(previous[i]));
+                    out.put(texel + 1, toByte(density[i]));
+                    out.put(texel + 2, toByte(light[i]));
+                    out.put(texel + 3, toByte(dilateA[i]));
+                }
+            }
+        }
+    }
+
+    public static final int BRICK = 4;
+
+    public int brickX() {
+        return (nx + BRICK - 1) / BRICK;
+    }
+
+    public int brickY() {
+        return (ny + BRICK - 1) / BRICK;
+    }
+
+    public int brickZ() {
+        return (nz + BRICK - 1) / BRICK;
+    }
+
+    /** Max dilated density per 4x4x4 brick, as R8 in the same slice layout as the atlas. */
+    public void writeBricks(ByteBuffer out) {
+        out.put(0, bricks, 0, bricks.length);
+    }
+
+    /** Voxel-space bounds of everything that could render, inclusive min / exclusive max. */
+    public int[] occupiedBounds() {
+        return occupied;
+    }
+
+    private void computeBricksAndBounds() {
+        int bx = brickX();
+        int by = brickY();
+        int bz = brickZ();
+        if (bricks == null) {
+            bricks = new byte[bx * by * bz];
+        }
+        java.util.Arrays.fill(bricks, (byte) 0);
+        int x0 = nx, y0 = ny, z0 = nz, x1 = 0, y1 = 0, z1 = 0;
+        int width = bx * by;
+        for (int y = 0; y < ny; y++) {
+            for (int z = 0; z < nz; z++) {
+                for (int x = 0; x < nx; x++) {
+                    float d = dilateA[index(x, y, z)];
+                    if (d < 0.01F) {
+                        continue;
+                    }
+                    x0 = Math.min(x0, x);
+                    y0 = Math.min(y0, y);
+                    z0 = Math.min(z0, z);
+                    x1 = Math.max(x1, x + 1);
+                    y1 = Math.max(y1, y + 1);
+                    z1 = Math.max(z1, z + 1);
+                    int b = (z / BRICK) * width + (y / BRICK) * bx + x / BRICK;
+                    int v = toByte(d) & 0xFF;
+                    if (v > (bricks[b] & 0xFF)) {
+                        bricks[b] = (byte) v;
+                    }
+                }
+            }
+        }
+        occupied = x1 > x0 ? new int[] {x0, y0, z0, x1, y1, z1} : new int[] {0, 0, 0, 0, 0, 0};
+    }
+
+    /**
+     * Cheap volumetric lighting from above: smoke stacked over a voxel shades it, nearer
+     * smoke counting more, plus a little ambient and a lighter top.
+     */
+    private void computeLight() {
+        for (int z = 0; z < nz; z++) {
+            for (int x = 0; x < nx; x++) {
+                float occlusion = 0.0F;
+                for (int y = ny - 1; y >= 0; y--) {
+                    int i = index(x, y, z);
+                    float height = y / (float) ny;
+                    float shadow = (float) Math.exp(-occlusion * LIGHT_ABSORB);
+                    light[i] = Math.min(1.0F, shadow * 0.8F + 0.12F + height * 0.15F);
+                    occlusion = occlusion * LIGHT_FALLOFF + density[i];
                 }
             }
         }
@@ -250,6 +344,7 @@ public final class SmokeRegion implements AutoCloseable {
 
     public void tick(Level level) {
         age++;
+        version++;
         for (Iterator<SmokeEmitter> it = emitters.iterator(); it.hasNext(); ) {
             SmokeEmitter e = it.next();
             e.tick();
@@ -298,6 +393,7 @@ public final class SmokeRegion implements AutoCloseable {
      * hole stays clear briefly, then refills from the emitters and the surrounding smoke.
      */
     public void blast(Vec3 center, float radius) {
+        version++;
         double clear = radius * 1.75 + 1.0;
         int cx = toVoxel(center.x) - minX;
         int cy = toVoxel(center.y) - minY;
