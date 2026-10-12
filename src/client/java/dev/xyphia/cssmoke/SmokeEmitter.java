@@ -19,8 +19,10 @@ public final class SmokeEmitter {
     private static final int GROW_TICKS = 26;
     private static final int LIFE_TICKS = 18 * 20;
     private static final int FADE_TICKS = 3 * 20;
-    private static final int VOXEL_BUDGET = 3400;
-    private static final float MAX_COST = 12.5F;
+    /** CS2 smoke: ~2.5-3 block radius in open space = ~800-1000 voxels. */
+    private static final int VOXEL_BUDGET = 1200;
+    /** Tighter cost limit for realistic cloud bounds. */
+    private static final float MAX_COST = 8.0F;
     private static final float UP_COST = 1.8F;
     private static final float DOWN_COST = 0.8F;
     /** Confinement factor: how constrained is a voxel (0=free, 1=fully enclosed). */

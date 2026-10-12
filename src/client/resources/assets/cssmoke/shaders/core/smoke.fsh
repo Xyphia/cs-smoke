@@ -47,11 +47,10 @@ const float PIXEL = 1.0 / 16.0;
 // Fine steps per ray before handing off to the coarse march.
 const int MAX_CELLS = 256;
 const float THRESHOLD = 0.35;
-// A cube is visible only if shape * 3.4 > THRESHOLD, and shape <= base * 1.3, so smoke
-// thinner than this can never produce a visible cube: skip it (it is mostly the faint
-// diffusion fringe around a cloud, which rays from outside would otherwise fine-step).
-const float VISIBLE_DENSITY = 0.075;
-const float EDGE_VISIBLE_DENSITY = 0.055;
+// Visibility thresholds: tighter bounds exclude faint perimeter, realistic cloud size.
+// Core voxels (open space): 0.095 | Edge voxels (near walls): 0.06
+const float VISIBLE_DENSITY = 0.095;
+const float EDGE_VISIBLE_DENSITY = 0.06;
 const float CUBE_EXTINCTION = 2.4;
 const float SURFACE_ALPHA = 0.32;
 const float EDGE_SURFACE_ALPHA = 0.24;

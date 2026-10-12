@@ -277,8 +277,9 @@ public final class SmokeRegion implements AutoCloseable {
             for (int z = 0; z < nz; z++) {
                 for (int x = 0; x < nx; x++) {
                     float d = dilateA[index(x, y, z)];
-                    // Adaptive threshold: refined edges for better boundary detection, sharper near walls.
-                    float threshold = isNearWall(x, y, z) ? 0.055F : 0.075F;
+                    // Use tighter threshold to exclude faint perimeter: only count visible density.
+                    // Near walls: 0.06F | open space: 0.095F (sharper cutoff).
+                    float threshold = isNearWall(x, y, z) ? 0.06F : 0.095F;
                     if (d < threshold) {
                         continue;
                     }
